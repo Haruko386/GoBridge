@@ -5,8 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/Haruko386/GoBridge/internal/config"
+	"github.com/Haruko386/GoBridge/internal/identity"
 )
 
 const usage = `GoBridge - bind machines, not IP addresses.
@@ -43,6 +45,7 @@ func Run(args []string, stdout, stderr io.Writer, version string) int {
 	}
 }
 
+// runInit initializes the configuration and machine identity.
 func runInit(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("init", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -93,6 +96,12 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	nodeIdentity, err := identity.Generate()
+	if err != nil {
+		fmt.Fprintf(stderr, "init: generate identity: %v\n", err)
+		return 1
+	}
+
 	if err := config.SaveNew(*configDir, cfg); err != nil {
 		if errors.Is(err, config.ErrAlreadyInitialized) {
 			fmt.Fprintf(stderr, "init: %v\n", err)
@@ -103,7 +112,23 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "Initialized GoBridge %s at %s\n", role, config.FilePath(*configDir))
+	if err := identity.SaveNew(*configDir, nodeIdentity); err != nil {
+		rollbackErr := os.Remove(config.FilePath(*configDir))
+		if rollbackErr != nil {
+			err = errors.Join(err, fmt.Errorf("rollback configuration: %w", rollbackErr))
+		}
+
+		fmt.Fprintf(stderr, "init: save identity: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(
+		stdout,
+		"Initialized GoBridge %s at %s\nNode ID: %s\n",
+		role,
+		*configDir,
+		nodeIdentity.NodeID(),
+	)
 
 	return 0
 }

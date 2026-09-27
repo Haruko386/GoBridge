@@ -2,10 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"errors"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/Haruko386/GoBridge/internal/config"
+	"github.com/Haruko386/GoBridge/internal/identity"
 )
 
 func TestRun(t *testing.T) {
@@ -99,6 +102,22 @@ func TestRunInit(t *testing.T) {
 			}
 			if !strings.Contains(stdout.String(), "Initialized GoBridge "+string(tt.role)) {
 				t.Errorf("Run() stdout = %q, want initialization message", stdout.String())
+			}
+
+			nodeIdentity, err := identity.Load(dir)
+			if err != nil {
+				t.Fatalf("identity.Load() error = %v", err)
+			}
+
+			if !strings.Contains(
+				stdout.String(),
+				nodeIdentity.NodeID(),
+			) {
+				t.Errorf(
+					"Run() stdout = %q, want node ID %q",
+					stdout.String(),
+					nodeIdentity.NodeID(),
+				)
 			}
 
 			cfg, err := config.Load(dir)
@@ -209,5 +228,66 @@ func assertOutput(t *testing.T, stream, got, wantSubstring string) {
 
 	if !strings.Contains(got, wantSubstring) {
 		t.Errorf("%s = %q, want it to contain %q", stream, got, wantSubstring)
+	}
+}
+
+func TestRunInitRollsBackConfigWhenIdentityExists(
+	t *testing.T,
+) {
+	dir := t.TempDir()
+
+	existingIdentity, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate() error = %v", err)
+	}
+
+	if err := identity.SaveNew(
+		dir,
+		existingIdentity,
+	); err != nil {
+		t.Fatalf("identity.SaveNew() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	exitCode := Run(
+		[]string{
+			"init",
+			"--role", "server",
+			"--config-dir", dir,
+		},
+		&stdout,
+		&stderr,
+		"test-version",
+	)
+
+	if exitCode != 1 {
+		t.Errorf(
+			"Run() exit code = %d, want 1",
+			exitCode,
+		)
+	}
+
+	if _, err := os.Stat(config.FilePath(dir)); !errors.Is(
+		err,
+		os.ErrNotExist,
+	) {
+		t.Errorf(
+			"config file still exists after rollback: %v",
+			err,
+		)
+	}
+
+	loadedIdentity, err := identity.Load(dir)
+	if err != nil {
+		t.Fatalf(
+			"identity.Load() after failed init: %v",
+			err,
+		)
+	}
+
+	if loadedIdentity.NodeID() != existingIdentity.NodeID() {
+		t.Fatal("existing identity was modified")
 	}
 }
