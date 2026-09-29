@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -254,6 +255,79 @@ func TestSaveNewDoesNotOverwrite(t *testing.T) {
 	}
 	if loaded.Role != RoleServer {
 		t.Errorf("saved role = %q, want original role %q", loaded.Role, RoleServer)
+	}
+}
+
+func TestSaveUpdatesExistingConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := New(RoleClient)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := SaveNew(dir, cfg); err != nil {
+		t.Fatalf("SaveNew() error = %v", err)
+	}
+
+	cfg.Client.ServerAddress = "127.0.0.1:18790"
+	if err := Save(dir, cfg); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := loaded.Client.ServerAddress; got != cfg.Client.ServerAddress {
+		t.Fatalf("ServerAddress = %q, want %q", got, cfg.Client.ServerAddress)
+	}
+	if matches, err := filepath.Glob(filepath.Join(dir, "config-*.tmp")); err != nil {
+		t.Fatalf("Glob() error = %v", err)
+	} else if len(matches) != 0 {
+		t.Fatalf("temporary configuration files remain: %v", matches)
+	}
+}
+
+func TestSaveCreatesConfiguration(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := New(RoleServer)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := Save(dir, cfg); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.Role != RoleServer {
+		t.Fatalf("Role = %q, want %q", loaded.Role, RoleServer)
+	}
+}
+
+func TestLoadRecoversConfigurationBackup(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := New(RoleClient)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if err := SaveNew(dir, cfg); err != nil {
+		t.Fatalf("SaveNew() error = %v", err)
+	}
+
+	path := FilePath(dir)
+	backupPath := path + ".bak"
+	if err := os.Rename(path, backupPath); err != nil {
+		t.Fatalf("Rename(config, backup) error = %v", err)
+	}
+	if _, err := Load(dir); err != nil {
+		t.Fatalf("Load() recovery error = %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("recovered config Stat() error = %v", err)
+	}
+	if _, err := os.Stat(backupPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("backup remains after recovery: %v", err)
 	}
 }
 

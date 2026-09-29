@@ -32,6 +32,10 @@ const (
 	TypeAuthFailed    MessageType = 4
 	TypePing          MessageType = 5
 	TypePong          MessageType = 6
+	TypePairChallenge MessageType = 7
+	TypePairRequest   MessageType = 8
+	TypePairOK        MessageType = 9
+	TypePairFailed    MessageType = 10
 )
 
 type Frame struct {
@@ -41,7 +45,7 @@ type Frame struct {
 
 func (t MessageType) Valid() bool {
 	switch t {
-	case TypeAuthChallenge, TypeAuthResponse, TypeAuthOK, TypeAuthFailed, TypePing, TypePong:
+	case TypeAuthChallenge, TypeAuthResponse, TypeAuthOK, TypeAuthFailed, TypePing, TypePong, TypePairChallenge, TypePairRequest, TypePairOK, TypePairFailed:
 		return true
 	default:
 		return false
@@ -62,6 +66,14 @@ func (t MessageType) String() string {
 		return "PING"
 	case TypePong:
 		return "PONG"
+	case TypePairChallenge:
+		return "PAIR_CHALLENGE"
+	case TypePairRequest:
+		return "PAIR_REQUEST"
+	case TypePairOK:
+		return "PAIR_OK"
+	case TypePairFailed:
+		return "PAIR_FAILED"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", uint8(t))
 	}
