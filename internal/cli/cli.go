@@ -18,6 +18,7 @@ Usage:
 
 Commands:
   init       Initialize this machine
+  pair       Pair two GoBridge machines
   help       Show help information
   version    Show version information
 `
@@ -38,6 +39,8 @@ func Run(args []string, stdout, stderr io.Writer, version string) int {
 		return 0
 	case "init":
 		return runInit(args[1:], stdout, stderr)
+	case "pair":
+		return runPair(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
 		fmt.Fprint(stderr, usage)

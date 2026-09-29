@@ -1,0 +1,350 @@
+package cli
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/Haruko386/GoBridge/internal/config"
+	"github.com/Haruko386/GoBridge/internal/identity"
+	"github.com/Haruko386/GoBridge/internal/pairing"
+	"github.com/Haruko386/GoBridge/internal/peer"
+	"github.com/Haruko386/GoBridge/internal/transport"
+)
+
+const (
+	defaultPairCodeTTL = 10 * time.Minute
+	defaultPairTimeout = 15 * time.Second
+)
+
+func runPair(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		printPairUsage(stderr)
+		return 2
+	}
+
+	switch args[0] {
+	case "create":
+		return runPairCreate(args[1:], stdout, stderr)
+	case "help", "-h", "--help":
+		printPairUsage(stdout)
+		return 0
+	default:
+		return runPairClient(args[0], args[1:], stdout, stderr)
+	}
+}
+
+func printPairUsage(writer io.Writer) {
+	fmt.Fprintln(writer, `Usage:
+  gobridge pair create [options]
+  gobridge pair <server-address> --code <code> [options]`)
+}
+
+func runPairCreate(args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("pair create", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	configDir := flags.String("config-dir", "", "configuration directory")
+	name := flags.String("name", "", "local machine name (default: hostname)")
+	ttl := flags.Duration("ttl", defaultPairCodeTTL, "pair code lifetime")
+	timeout := flags.Duration("timeout", defaultPairTimeout, "timeout for each pairing connection")
+
+	flags.Usage = func() {
+		fmt.Fprintln(stderr, "Usage: gobridge pair create [options]")
+		flags.PrintDefaults()
+	}
+
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	if flags.NArg() != 0 {
+		fmt.Fprintf(stderr, "pair create: unexpected arguments: %v\n", flags.Args())
+		return 2
+	}
+
+	if *ttl <= 0 {
+		fmt.Fprintln(stderr, "pair create: ttl must be greater than zero")
+		return 2
+	}
+
+	if *timeout <= 0 {
+		fmt.Fprintln(stderr, "pair create: timeout must be greater than zero")
+		return 2
+	}
+
+	var err error
+
+	if *configDir == "" {
+		*configDir, err = config.DefaultDir()
+		if err != nil {
+			fmt.Fprintf(stderr, "pair create: %v\n", err)
+			return 1
+		}
+	}
+
+	cfg, err := config.Load(*configDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "pair create: load config: %v\n", err)
+		return 1
+	}
+
+	if cfg.Role != config.RoleServer {
+		fmt.Fprintf(stderr, "pair create: role %s not server\n", cfg.Role)
+		return 1
+	}
+
+	nodeIdentity, err := identity.Load(*configDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "pair create: load identity: %v\n", err)
+		return 1
+	}
+
+	localName, err := resolveNodeName(*name)
+	if err != nil {
+		fmt.Fprintf(stderr, "pair create: %v\n", err)
+		return 2
+	}
+
+	store, err := peer.Open(*configDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "pair create: open peer store: %v\n", err)
+		return 1
+	}
+
+	manager, err := pairing.NewManager(nodeIdentity.PublicKey())
+	if err != nil {
+		fmt.Fprintf(stderr, "pair create: create pairing manager: %v\n", err)
+		return 1
+	}
+
+	code, err := manager.Create(*ttl)
+	if err != nil {
+		fmt.Fprintf(stderr, "pair create: create code: %v\n", err)
+		return 1
+	}
+
+	tlsConfig, err := transport.NewServerTLSConfig(nodeIdentity)
+	if err != nil {
+		fmt.Fprintf(stderr, "pair create: create tls config: %v\n", err)
+		return 1
+	}
+
+	listener, err := net.Listen("tcp", cfg.Server.ControlListen)
+	if err != nil {
+		fmt.Fprintf(stderr, "pair create: listen on %s: %v\n", cfg.Server.ControlListen, err)
+		return 1
+	}
+	defer listener.Close()
+
+	tcpListener, ok := listener.(*net.TCPListener)
+	if !ok {
+		fmt.Fprintln(stderr, "pair create: listener is not TCP")
+		return 1
+	}
+
+	expiredAt := time.Now().Add(*ttl)
+
+	if err := tcpListener.SetDeadline(expiredAt); err != nil {
+		fmt.Fprintf(stderr, "pair create: set deadline on %s: %v\n", cfg.Server.ControlListen, err)
+		return 1
+	}
+
+	fmt.Fprintf(
+		stdout,
+		"Pair code: %s\nListening: %s\nExpires in: %s\n",
+		code.String(),
+		listener.Addr(),
+		ttl.String(),
+	)
+
+	for {
+		rawConn, err := listener.Accept()
+		if err != nil {
+			if netError, ok2 := errors.AsType[net.Error](err); ok2 && netError.Timeout() {
+				fmt.Fprintln(stderr, "pair create: pair code expired")
+				return 1
+			}
+			fmt.Fprintf(stderr, "pair create: accept connection: %v\n", err)
+			return 1
+		}
+
+		pairedPeer, err := transport.AcceptServerPairing(
+			context.Background(),
+			rawConn,
+			tlsConfig,
+			manager,
+			nodeIdentity,
+			localName,
+			store,
+			*timeout,
+		)
+		if err != nil {
+			fmt.Fprintf(stderr, "pair create: rejected connection: %v\n", err)
+			continue
+		}
+
+		fmt.Fprintf(stdout, "Paired with %s\nNode ID: %s\n", pairedPeer.Name, pairedPeer.NodeID)
+
+		return 0
+	}
+}
+
+func runPairClient(address string, args []string, stdout, stderr io.Writer) int {
+	flags := flag.NewFlagSet("pair", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	codeValue := flags.String("code", "", "pair code generated by the server")
+	configDir := flags.String("config-dir", "", "configuration directory")
+	name := flags.String("name", "", "local machine name (default: hostname)")
+	timeout := flags.Duration("timeout", defaultPairTimeout, "pair timeout")
+
+	flags.Usage = func() {
+		fmt.Fprintln(
+			stderr,
+			"Usage: gobridge pair <server-address> --code <code> [options]",
+		)
+		flags.PrintDefaults()
+	}
+
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	if flags.NArg() != 0 {
+		fmt.Fprintf(stderr, "pair client: unexpected arguments: %v\n", flags.Args())
+		return 2
+	}
+
+	if *codeValue == "" {
+		fmt.Fprintln(stderr, "pair: --code is required")
+		return 2
+	}
+
+	if *timeout <= 0 {
+		fmt.Fprintln(stderr, "pair: --timeout must be positive")
+		return 2
+	}
+
+	if _, _, err := net.SplitHostPort(address); err != nil {
+		fmt.Fprintf(stderr, "pair: invalid server address %q: %v\n", address, err)
+		return 2
+	}
+
+	code, err := pairing.Parse(*codeValue)
+	if err != nil {
+		fmt.Fprintf(stderr, "pair: invalid code: %v\n", err)
+		return 2
+	}
+
+	if *configDir == "" {
+		*configDir, err = config.DefaultDir()
+		if err != nil {
+			fmt.Fprintf(stderr, "pair: default configuration directory: %v\n", err)
+			return 1
+		}
+	}
+
+	cfg, err := config.Load(*configDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "pair: load config: %v\n", err)
+		return 1
+	}
+
+	if cfg.Role != config.RoleClient {
+		fmt.Fprintln(stderr, "pair: this machine is not configured as a client")
+		return 1
+	}
+
+	nodeIdentity, err := identity.Load(*configDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "pair: load identity: %v\n", err)
+		return 1
+	}
+
+	localName, err := resolveNodeName(*name)
+	if err != nil {
+		fmt.Fprintf(stderr, "pair: resolve node name: %v\n", err)
+	}
+
+	store, err := peer.Open(*configDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "pair: open peer store: %v\n", err)
+		return 1
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	serverPeer, err := transport.DialClientPairing(
+		ctx,
+		address,
+		code,
+		nodeIdentity,
+		localName,
+		store,
+		*timeout,
+	)
+	if err != nil {
+		fmt.Fprintf(stderr, "pair: connect to server: %v\n", err)
+		return 1
+	}
+
+	cfg.Client.ServerAddress = address
+
+	if err := config.Save(*configDir, cfg); err != nil {
+		fmt.Fprintf(stderr, "pair: save config: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintf(
+		stdout,
+		"Paired with %s\nNode ID: %s\nServer: %s\n",
+		serverPeer.Name,
+		serverPeer.NodeID,
+		address,
+	)
+
+	return 0
+}
+
+func resolveNodeName(value string) (string, error) {
+	if value == "" {
+		hostname, err := os.Hostname()
+		if err != nil {
+			return "", fmt.Errorf("determine hostname: %w", err)
+		}
+		value = hostname
+	}
+
+	if value == "" {
+		return "", errors.New("machine name must not be empty")
+	}
+
+	if value != strings.TrimSpace(value) {
+		return "", errors.New("machine name must not contain surrounding whitespace")
+	}
+
+	if !utf8.ValidString(value) {
+		return "", errors.New("machine name must be valid UTF-8")
+	}
+
+	if len([]byte(value)) > pairing.MaxPeerNameSize {
+		return "", fmt.Errorf("machine name is too long: got %d bytes, maximum is %d", len([]byte(value)), pairing.MaxPeerNameSize)
+	}
+
+	return value, nil
+}
