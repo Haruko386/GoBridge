@@ -122,6 +122,31 @@ func (c Config) Validate() error {
 	return nil
 }
 
+func Save(dir string, cfg Config) error {
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid config: %w", err)
+	}
+
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create configuration directory: %w", err)
+	}
+
+	path := FilePath(dir)
+	if err := writeFileAtomic(path, data); err != nil {
+		return fmt.Errorf(
+			"save configuration: %w",
+			err,
+		)
+	}
+
+	return nil
+}
+
 func DefaultDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -187,6 +212,10 @@ func SaveNew(dir string, cfg Config) error {
 func Load(dir string) (Config, error) {
 	path := FilePath(dir)
 
+	if err := recoverBackup(path); err != nil {
+		return Config{}, fmt.Errorf("recover configuration: %w", err)
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read configuration: %w", err)
@@ -215,4 +244,103 @@ func validateAddress(name, address string) error {
 	}
 
 	return nil
+}
+
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+
+	temp, err := os.CreateTemp(dir, "config-*.tmp")
+	if err != nil {
+		return err
+	}
+
+	tempPath := temp.Name()
+	cleanup := true
+
+	defer func() {
+		if cleanup {
+			_ = temp.Close()
+			_ = os.Remove(tempPath)
+		}
+	}()
+
+	if err := temp.Chmod(0o600); err != nil {
+		return err
+	}
+
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
+		return err
+	}
+
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return err
+	}
+
+	if err := temp.Close(); err != nil {
+		return err
+	}
+
+	if err := replaceFile(tempPath, path); err != nil {
+		return err
+	}
+
+	cleanup = false
+	return nil
+}
+
+func replaceFile(tempPath, targetPath string) error {
+	backupPath := targetPath + ".bak"
+
+	if _, err := os.Stat(targetPath); errors.Is(err, os.ErrNotExist) {
+		return os.Rename(tempPath, targetPath)
+	} else if err != nil {
+		return err
+	}
+
+	if err := os.Remove(backupPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	if err := os.Rename(targetPath, backupPath); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tempPath, targetPath); err != nil {
+		_ = os.Rename(backupPath, targetPath)
+		return err
+	}
+	// 新配置已经成功落盘。备份清理失败不能再报告保存失败，
+	// 否则内存状态和磁盘状态的判断会不一致。
+	_ = os.Remove(backupPath)
+
+	return nil
+}
+
+func recoverBackup(path string) error {
+	backupPath := path + ".bak"
+
+	_, targetErr := os.Stat(path)
+	_, backupErr := os.Stat(backupPath)
+
+	switch {
+	case targetErr == nil && backupErr == nil:
+		return os.Remove(backupPath)
+
+	case errors.Is(targetErr, os.ErrNotExist) &&
+		backupErr == nil:
+		return os.Rename(backupPath, path)
+
+	case targetErr != nil &&
+		!errors.Is(targetErr, os.ErrNotExist):
+		return targetErr
+
+	case backupErr != nil &&
+		!errors.Is(backupErr, os.ErrNotExist):
+		return backupErr
+
+	default:
+		return nil
+	}
 }
