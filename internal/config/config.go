@@ -1,6 +1,8 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -31,6 +33,7 @@ type ServerConfig struct {
 
 type ClientConfig struct {
 	ServerAddress string `yaml:"server_address,omitempty"`
+	ServerNodeID  string `yaml:"server_node_id,omitempty"`
 	ProxyAddress  string `yaml:"proxy_address"`
 }
 
@@ -105,15 +108,25 @@ func (c Config) Validate() error {
 			return errors.New("server configuration should be empty")
 		}
 
-		if err := validateAddress("client proxy address", c.Client.ProxyAddress); err != nil {
-			return err
-		}
-		// A client is not paired during initialization, so ServerAddress may be empty.
+		hasAddress := c.Client.ServerAddress != ""
+		hasNodeID := c.Client.ServerNodeID != ""
 
-		if c.Client.ServerAddress != "" {
+		if hasAddress != hasNodeID {
+			return errors.New("client server address and node ID must either both be set or both be empty")
+		}
+
+		if hasAddress {
 			if err := validateAddress("client server address", c.Client.ServerAddress); err != nil {
 				return err
 			}
+
+			if err := validateNodeID(c.Client.ServerNodeID); err != nil {
+				return err
+			}
+		}
+
+		if err := validateAddress("client proxy address", c.Client.ProxyAddress); err != nil {
+			return err
 		}
 	default:
 		return fmt.Errorf("invalid role: %s", c.Role)
@@ -227,11 +240,32 @@ func Load(dir string) (Config, error) {
 		return Config{}, fmt.Errorf("unmarshal configuration: %w", err)
 	}
 
+	// Configurations written before ServerNodeID was introduced may contain
+	// only ServerAddress. Treat them as unpaired so the pairing command can
+	// run again and persist both fields atomically.
+	if cfg.Role == RoleClient && cfg.Client != nil &&
+		cfg.Client.ServerAddress != "" && cfg.Client.ServerNodeID == "" {
+		cfg.Client.ServerAddress = ""
+	}
+
 	if err := cfg.Validate(); err != nil {
 		return Config{}, fmt.Errorf("validate configuration: %w", err)
 	}
 
 	return cfg, nil
+}
+
+func validateNodeID(nodeID string) error {
+	decoded, err := hex.DecodeString(nodeID)
+	if err != nil {
+		return fmt.Errorf("invalid server node ID: %w", err)
+	}
+
+	if len(decoded) != sha256.Size {
+		return fmt.Errorf("invalid server node ID length: got %d bytes, want %d", len(decoded), sha256.Size)
+	}
+
+	return nil
 }
 
 func validateAddress(name, address string) error {

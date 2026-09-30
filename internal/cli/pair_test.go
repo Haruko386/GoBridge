@@ -106,6 +106,13 @@ func TestPairCLIEndToEnd(t *testing.T) {
 	if clientConfig.Client.ServerAddress != address {
 		t.Fatalf("saved server address = %q, want %q", clientConfig.Client.ServerAddress, address)
 	}
+	if clientConfig.Client.ServerNodeID != serverIdentity.NodeID() {
+		t.Fatalf(
+			"saved server node ID = %q, want %q",
+			clientConfig.Client.ServerNodeID,
+			serverIdentity.NodeID(),
+		)
+	}
 }
 
 func TestPairCLIRejectsInvalidCodeWithoutEchoingSecret(t *testing.T) {

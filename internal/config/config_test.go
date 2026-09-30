@@ -62,6 +62,9 @@ func TestNewDefaults(t *testing.T) {
 	if client.Client.ServerAddress != "" {
 		t.Errorf("ServerAddress = %q, want empty address before pairing", client.Client.ServerAddress)
 	}
+	if client.Client.ServerNodeID != "" {
+		t.Errorf("ServerNodeID = %q, want empty node ID before pairing", client.Client.ServerNodeID)
+	}
 	if client.Client.ProxyAddress != "127.0.0.1:7897" {
 		t.Errorf("ProxyAddress = %q, want %q", client.Client.ProxyAddress, "127.0.0.1:7897")
 	}
@@ -181,6 +184,49 @@ func TestValidateRejectsInvalidConfig(t *testing.T) {
 				cfg := validClient
 				client := *cfg.Client
 				client.ServerAddress = "invalid"
+				client.ServerNodeID = strings.Repeat("0", 64)
+				cfg.Client = &client
+				return cfg
+			},
+		},
+		{
+			name: "server address without node ID",
+			mutate: func() Config {
+				cfg := validClient
+				client := *cfg.Client
+				client.ServerAddress = "127.0.0.1:18790"
+				cfg.Client = &client
+				return cfg
+			},
+		},
+		{
+			name: "server node ID without address",
+			mutate: func() Config {
+				cfg := validClient
+				client := *cfg.Client
+				client.ServerNodeID = strings.Repeat("0", 64)
+				cfg.Client = &client
+				return cfg
+			},
+		},
+		{
+			name: "invalid server node ID encoding",
+			mutate: func() Config {
+				cfg := validClient
+				client := *cfg.Client
+				client.ServerAddress = "127.0.0.1:18790"
+				client.ServerNodeID = strings.Repeat("z", 64)
+				cfg.Client = &client
+				return cfg
+			},
+		},
+		{
+			name: "invalid server node ID length",
+			mutate: func() Config {
+				cfg := validClient
+				client := *cfg.Client
+				client.ServerAddress = "127.0.0.1:18790"
+				client.ServerNodeID = "00"
 				cfg.Client = &client
 				return cfg
 			},
@@ -231,6 +277,36 @@ func TestSaveAndLoad(t *testing.T) {
 	}
 }
 
+func TestLoadTreatsLegacyAddressOnlyClientAsUnpaired(t *testing.T) {
+	dir := t.TempDir()
+	legacy := []byte(`version: 1
+role: client
+client:
+  server_address: 192.0.2.10:18790
+  proxy_address: 127.0.0.1:7897
+`)
+	if err := os.WriteFile(FilePath(dir), legacy, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Client == nil {
+		t.Fatal("loaded client configuration is nil")
+	}
+	if cfg.Client.ServerAddress != "" {
+		t.Fatalf("ServerAddress = %q, want empty legacy address", cfg.Client.ServerAddress)
+	}
+	if cfg.Client.ServerNodeID != "" {
+		t.Fatalf("ServerNodeID = %q, want empty node ID", cfg.Client.ServerNodeID)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("migrated configuration Validate() error = %v", err)
+	}
+}
+
 func TestSaveNewDoesNotOverwrite(t *testing.T) {
 	dir := t.TempDir()
 	server, err := New(RoleServer)
@@ -269,6 +345,7 @@ func TestSaveUpdatesExistingConfiguration(t *testing.T) {
 	}
 
 	cfg.Client.ServerAddress = "127.0.0.1:18790"
+	cfg.Client.ServerNodeID = strings.Repeat("0", 64)
 	if err := Save(dir, cfg); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
@@ -279,6 +356,9 @@ func TestSaveUpdatesExistingConfiguration(t *testing.T) {
 	}
 	if got := loaded.Client.ServerAddress; got != cfg.Client.ServerAddress {
 		t.Fatalf("ServerAddress = %q, want %q", got, cfg.Client.ServerAddress)
+	}
+	if got := loaded.Client.ServerNodeID; got != cfg.Client.ServerNodeID {
+		t.Fatalf("ServerNodeID = %q, want %q", got, cfg.Client.ServerNodeID)
 	}
 	if matches, err := filepath.Glob(filepath.Join(dir, "config-*.tmp")); err != nil {
 		t.Fatalf("Glob() error = %v", err)

@@ -304,6 +304,7 @@ func runPairClient(address string, args []string, stdout, stderr io.Writer) int 
 	}
 
 	cfg.Client.ServerAddress = address
+	cfg.Client.ServerNodeID = serverPeer.NodeID
 
 	if err := config.Save(*configDir, cfg); err != nil {
 		fmt.Fprintf(stderr, "pair: save config: %v\n", err)
