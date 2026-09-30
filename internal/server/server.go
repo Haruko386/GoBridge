@@ -16,6 +16,11 @@ import (
 type SessionHandler func(context.Context, Session) error
 type ErrorHandler func(error)
 
+const (
+	initialAcceptRetryDelay = 5 * time.Millisecond
+	maxAcceptRetryDelay     = time.Second
+)
+
 type Server struct {
 	listener    net.Listener
 	tlsConfig   *tls.Config
@@ -98,6 +103,7 @@ func (s *Server) Serve(ctx context.Context) error {
 		_ = s.listener.Close()
 	})
 	defer stopAccept()
+	var retryDelay time.Duration
 
 	for {
 		rawConn, err := s.listener.Accept()
@@ -105,8 +111,35 @@ func (s *Server) Serve(ctx context.Context) error {
 			if runCtx.Err() != nil {
 				return nil
 			}
+
+			if netErr, ok := err.(net.Error); ok && netErr.Temporary() {
+				if retryDelay == 0 {
+					retryDelay = initialAcceptRetryDelay
+				} else {
+					retryDelay *= 2
+				}
+				if retryDelay > maxAcceptRetryDelay {
+					retryDelay = maxAcceptRetryDelay
+				}
+
+				timer := time.NewTimer(retryDelay)
+				select {
+				case <-runCtx.Done():
+					if !timer.Stop() {
+						select {
+						case <-timer.C:
+						default:
+						}
+					}
+					return nil
+				case <-timer.C:
+				}
+				continue
+			}
+
 			return fmt.Errorf("accept connection: %w", err)
 		}
+		retryDelay = 0
 
 		workers.Add(1)
 		go func() {

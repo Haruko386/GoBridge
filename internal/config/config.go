@@ -240,6 +240,14 @@ func Load(dir string) (Config, error) {
 		return Config{}, fmt.Errorf("unmarshal configuration: %w", err)
 	}
 
+	// Configurations written before ServerNodeID was introduced may contain
+	// only ServerAddress. Treat them as unpaired so the pairing command can
+	// run again and persist both fields atomically.
+	if cfg.Role == RoleClient && cfg.Client != nil &&
+		cfg.Client.ServerAddress != "" && cfg.Client.ServerNodeID == "" {
+		cfg.Client.ServerAddress = ""
+	}
+
 	if err := cfg.Validate(); err != nil {
 		return Config{}, fmt.Errorf("validate configuration: %w", err)
 	}

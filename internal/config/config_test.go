@@ -277,6 +277,36 @@ func TestSaveAndLoad(t *testing.T) {
 	}
 }
 
+func TestLoadTreatsLegacyAddressOnlyClientAsUnpaired(t *testing.T) {
+	dir := t.TempDir()
+	legacy := []byte(`version: 1
+role: client
+client:
+  server_address: 192.0.2.10:18790
+  proxy_address: 127.0.0.1:7897
+`)
+	if err := os.WriteFile(FilePath(dir), legacy, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Client == nil {
+		t.Fatal("loaded client configuration is nil")
+	}
+	if cfg.Client.ServerAddress != "" {
+		t.Fatalf("ServerAddress = %q, want empty legacy address", cfg.Client.ServerAddress)
+	}
+	if cfg.Client.ServerNodeID != "" {
+		t.Fatalf("ServerNodeID = %q, want empty node ID", cfg.Client.ServerNodeID)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("migrated configuration Validate() error = %v", err)
+	}
+}
+
 func TestSaveNewDoesNotOverwrite(t *testing.T) {
 	dir := t.TempDir()
 	server, err := New(RoleServer)

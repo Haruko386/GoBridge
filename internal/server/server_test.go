@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -217,6 +218,77 @@ func TestServerServeRejectsNilContext(t *testing.T) {
 	}
 }
 
+func TestServerRetriesOnlyTemporaryAcceptErrors(t *testing.T) {
+	temporary := &serverTestAcceptError{message: "temporary", temporary: true}
+	permanent := &serverTestAcceptError{message: "permanent"}
+	listener := &serverTestErrorListener{
+		errors: []error{temporary, temporary, permanent},
+	}
+	serverIdentity := serverTestIdentity(t)
+	server := serverTestNew(
+		t,
+		listener,
+		serverIdentity,
+		func(string) (ed25519.PublicKey, bool) { return nil, false },
+		NewRegistry(),
+		func(context.Context, Session) error { return nil },
+		nil,
+	)
+
+	err := server.Serve(context.Background())
+	if !errors.Is(err, permanent) {
+		t.Fatalf("Serve() error = %v, want wrapped permanent error", err)
+	}
+	if got := listener.Attempts(); got != 3 {
+		t.Fatalf("Accept() attempts = %d, want 3", got)
+	}
+}
+
+func TestServerReturnsClosedListenerErrorWithoutRetry(t *testing.T) {
+	listener := &serverTestErrorListener{errors: []error{net.ErrClosed}}
+	server := serverTestNew(
+		t,
+		listener,
+		serverTestIdentity(t),
+		func(string) (ed25519.PublicKey, bool) { return nil, false },
+		NewRegistry(),
+		func(context.Context, Session) error { return nil },
+		nil,
+	)
+
+	err := server.Serve(context.Background())
+	if !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Serve() error = %v, want wrapped net.ErrClosed", err)
+	}
+	if got := listener.Attempts(); got != 1 {
+		t.Fatalf("Accept() attempts = %d, want 1", got)
+	}
+}
+
+func TestServerCancellationStopsTemporaryAcceptBackoff(t *testing.T) {
+	listener := &serverTestErrorListener{
+		repeat:   &serverTestAcceptError{message: "temporary", temporary: true},
+		accepted: make(chan struct{}, 1),
+	}
+	server := serverTestNew(
+		t,
+		listener,
+		serverTestIdentity(t),
+		func(string) (ed25519.PublicKey, bool) { return nil, false },
+		NewRegistry(),
+		func(context.Context, Session) error { return nil },
+		nil,
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- server.Serve(ctx) }()
+	serverTestReceive(t, listener.accepted, "temporary Accept error")
+	cancel()
+	if err := serverTestReceive(t, result, "Serve cancellation during Accept backoff"); err != nil {
+		t.Fatalf("Serve() error = %v, want nil", err)
+	}
+}
+
 func serverTestNew(
 	t *testing.T,
 	listener net.Listener,
@@ -321,4 +393,62 @@ func serverTestEventually(t *testing.T, condition func() bool, description strin
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", description)
+}
+
+type serverTestAcceptError struct {
+	message   string
+	temporary bool
+}
+
+func (e *serverTestAcceptError) Error() string   { return e.message }
+func (e *serverTestAcceptError) Timeout() bool   { return false }
+func (e *serverTestAcceptError) Temporary() bool { return e.temporary }
+
+type serverTestErrorListener struct {
+	mu       sync.Mutex
+	errors   []error
+	repeat   error
+	accepted chan struct{}
+	attempts int
+	closed   bool
+}
+
+func (l *serverTestErrorListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.attempts++
+
+	if l.accepted != nil {
+		select {
+		case l.accepted <- struct{}{}:
+		default:
+		}
+	}
+	if l.closed {
+		return nil, net.ErrClosed
+	}
+	if len(l.errors) > 0 {
+		err := l.errors[0]
+		l.errors = l.errors[1:]
+		return nil, err
+	}
+	if l.repeat != nil {
+		return nil, l.repeat
+	}
+	return nil, net.ErrClosed
+}
+
+func (l *serverTestErrorListener) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.closed = true
+	return nil
+}
+
+func (l *serverTestErrorListener) Addr() net.Addr { return &net.TCPAddr{} }
+
+func (l *serverTestErrorListener) Attempts() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.attempts
 }
