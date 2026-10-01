@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/Haruko386/GoBridge/internal/cli"
 )
@@ -9,6 +12,9 @@ import (
 var version = "dev"
 
 func main() {
-	exitCode := cli.Run(os.Args[1:], os.Stdout, os.Stderr, version)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	exitCode := cli.RunContext(ctx, os.Args[1:], os.Stdout, os.Stderr, version)
 	os.Exit(exitCode)
 }
