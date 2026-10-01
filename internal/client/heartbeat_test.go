@@ -87,6 +87,51 @@ func TestRunHeartbeatTimesOutAndClosesSession(t *testing.T) {
 	}
 }
 
+func TestRunHeartbeatWriteTimeoutClosesSessionAndWaitsForWriter(t *testing.T) {
+	session := newBlockingHeartbeatWriteSession()
+	result := make(chan error, 1)
+	go func() {
+		result <- RunHeartbeat(context.Background(), session, time.Second, 10*time.Millisecond)
+	}()
+
+	clientHeartbeatReceive(t, session.writeStarted, "blocked heartbeat write")
+	err := clientHeartbeatReceive(t, result, "heartbeat write timeout")
+	if !errors.Is(err, ErrHeartbeatTimeout) {
+		t.Fatalf("RunHeartbeat() error = %v, want ErrHeartbeatTimeout", err)
+	}
+	if got := session.closeCount.Load(); got != 1 {
+		t.Fatalf("underlying Close() count = %d, want 1", got)
+	}
+	select {
+	case <-session.writeReturned:
+	default:
+		t.Fatal("RunHeartbeat() returned before the blocked writer exited")
+	}
+}
+
+func TestRunHeartbeatCancellationClosesBlockedWriter(t *testing.T) {
+	session := newBlockingHeartbeatWriteSession()
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- RunHeartbeat(ctx, session, time.Second, time.Second)
+	}()
+
+	clientHeartbeatReceive(t, session.writeStarted, "blocked heartbeat write")
+	cancel()
+	if err := clientHeartbeatReceive(t, result, "heartbeat write cancellation"); err != nil {
+		t.Fatalf("RunHeartbeat() error = %v, want nil", err)
+	}
+	if got := session.closeCount.Load(); got != 1 {
+		t.Fatalf("underlying Close() count = %d, want 1", got)
+	}
+	select {
+	case <-session.writeReturned:
+	default:
+		t.Fatal("RunHeartbeat() returned before the blocked writer exited")
+	}
+}
+
 func TestRunHeartbeatReportsReadAndWriteFailures(t *testing.T) {
 	t.Run("write", func(t *testing.T) {
 		writeErr := errors.New("write failed")
@@ -212,6 +257,40 @@ type clientHeartbeatTestSession struct {
 	closeCount atomic.Int32
 	readers    atomic.Int32
 	maxReaders atomic.Int32
+}
+
+type blockingHeartbeatWriteSession struct {
+	writeStarted  chan struct{}
+	writeReturned chan struct{}
+	closed        chan struct{}
+	closeOnce     sync.Once
+	closeCount    atomic.Int32
+}
+
+func newBlockingHeartbeatWriteSession() *blockingHeartbeatWriteSession {
+	return &blockingHeartbeatWriteSession{
+		writeStarted:  make(chan struct{}, 1),
+		writeReturned: make(chan struct{}),
+		closed:        make(chan struct{}),
+	}
+}
+
+func (s *blockingHeartbeatWriteSession) WriteFrame(protocol.MessageType, []byte) error {
+	s.writeStarted <- struct{}{}
+	<-s.closed
+	close(s.writeReturned)
+	return net.ErrClosed
+}
+
+func (s *blockingHeartbeatWriteSession) ReadFrame() (protocol.Frame, error) {
+	<-s.closed
+	return protocol.Frame{}, net.ErrClosed
+}
+
+func (s *blockingHeartbeatWriteSession) Close() error {
+	s.closeCount.Add(1)
+	s.closeOnce.Do(func() { close(s.closed) })
+	return nil
 }
 
 func newClientHeartbeatTestSession() *clientHeartbeatTestSession {
