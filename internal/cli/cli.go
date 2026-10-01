@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -19,33 +20,15 @@ Usage:
 Commands:
   init       Initialize this machine
   pair       Pair two GoBridge machines
+  serve      Run the GoBridge server
+  connect    Connect to the paired server
   help       Show help information
   version    Show version information
 `
 
 // Run executes the command-line interface and returns a process exit code.
 func Run(args []string, stdout, stderr io.Writer, version string) int {
-	if len(args) == 0 {
-		fmt.Fprint(stdout, usage)
-		return 0
-	}
-
-	switch args[0] {
-	case "help", "-h", "--help":
-		fmt.Fprint(stdout, usage)
-		return 0
-	case "version", "-v", "--version":
-		fmt.Fprintf(stdout, "gobridge %s\n", version)
-		return 0
-	case "init":
-		return runInit(args[1:], stdout, stderr)
-	case "pair":
-		return runPair(args[1:], stdout, stderr)
-	default:
-		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
-		fmt.Fprint(stderr, usage)
-		return 2
-	}
+	return RunContext(context.Background(), args, stdout, stderr, version)
 }
 
 // runInit initializes the configuration and machine identity.
@@ -134,4 +117,36 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	)
 
 	return 0
+}
+
+func RunContext(ctx context.Context, args []string, stdout, stderr io.Writer, version string) int {
+	if ctx == nil {
+		fmt.Fprintln(stderr, "CLI context is nil")
+		return 1
+	}
+	if len(args) == 0 {
+		fmt.Fprint(stdout, usage)
+		return 0
+	}
+
+	switch args[0] {
+	case "help", "-h", "--help":
+		fmt.Fprint(stdout, usage)
+		return 0
+	case "version", "-v", "--version":
+		fmt.Fprintf(stdout, "gobridge %s\n", version)
+		return 0
+	case "init":
+		return runInit(args[1:], stdout, stderr)
+	case "serve":
+		return runServe(ctx, args[1:], stdout, stderr)
+	case "connect":
+		return runConnect(ctx, args[1:], stdout, stderr)
+	case "pair":
+		return runPair(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
+		fmt.Fprint(stderr, usage)
+		return 2
+	}
 }
