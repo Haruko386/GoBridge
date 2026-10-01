@@ -13,8 +13,12 @@ var version = "dev"
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
 
 	exitCode := cli.RunContext(ctx, os.Args[1:], os.Stdout, os.Stderr, version)
+	stop()
 	os.Exit(exitCode)
 }

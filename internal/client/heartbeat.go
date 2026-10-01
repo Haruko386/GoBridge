@@ -27,6 +27,19 @@ type heartbeatReadResult struct {
 	err   error
 }
 
+type closeOnceHeartbeatSession struct {
+	HeartbeatSession
+	closeOnce sync.Once
+	closeErr  error
+}
+
+func (s *closeOnceHeartbeatSession) Close() error {
+	s.closeOnce.Do(func() {
+		s.closeErr = s.HeartbeatSession.Close()
+	})
+	return s.closeErr
+}
+
 func RunHeartbeat(ctx context.Context, session HeartbeatSession, interval, timeout time.Duration) error {
 	if ctx == nil {
 		return errors.New("heartbeat context is nil")
@@ -40,6 +53,8 @@ func RunHeartbeat(ctx context.Context, session HeartbeatSession, interval, timeo
 	if timeout <= 0 {
 		return errors.New("heartbeat timeout must be positive")
 	}
+
+	session = &closeOnceHeartbeatSession{HeartbeatSession: session}
 
 	if ctx.Err() != nil {
 		_ = session.Close()
@@ -79,7 +94,7 @@ func RunHeartbeat(ctx context.Context, session HeartbeatSession, interval, timeo
 	}()
 
 	for {
-		if err := session.WriteFrame(protocol.TypePing, nil); err != nil {
+		if err := writeHeartbeatPing(ctx, session, timeout); err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
@@ -129,6 +144,29 @@ func RunHeartbeat(ctx context.Context, session HeartbeatSession, interval, timeo
 			}
 			return fmt.Errorf("%w: received %s without an outstanding PING", ErrUnexpectedHeartbeatFrame, result.frame.Type)
 		}
+	}
+}
+
+func writeHeartbeatPing(ctx context.Context, session HeartbeatSession, timeout time.Duration) error {
+	result := make(chan error, 1)
+	go func() {
+		result <- session.WriteFrame(protocol.TypePing, nil)
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer stopAndDrainTimer(timer)
+
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		_ = session.Close()
+		<-result
+		return ctx.Err()
+	case <-timer.C:
+		_ = session.Close()
+		<-result
+		return fmt.Errorf("%w: after %s", ErrHeartbeatTimeout, timeout)
 	}
 }
 
