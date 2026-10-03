@@ -22,6 +22,11 @@ Commands:
   pair       Pair two GoBridge machines
   serve      Run the GoBridge server
   connect    Connect to the paired server
+  status     Show local configuration status
+  peers      List paired machines
+  enable     Enable a paired machine
+  disable    Disable a paired machine
+  unpair     Remove a paired machine
   help       Show help information
   version    Show version information
 `
@@ -144,6 +149,12 @@ func RunContext(ctx context.Context, args []string, stdout, stderr io.Writer, ve
 		return runConnect(ctx, args[1:], stdout, stderr)
 	case "pair":
 		return runPair(args[1:], stdout, stderr)
+	case "status":
+		return runStatus(args[1:], stdout, stderr)
+	case "peers":
+		return runPeers(args[1:], stdout, stderr)
+	case "enable", "disable", "unpair":
+		return runPeerCommand(args[0], args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
 		fmt.Fprint(stderr, usage)
