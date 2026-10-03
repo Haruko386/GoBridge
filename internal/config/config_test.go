@@ -48,8 +48,8 @@ func TestNewDefaults(t *testing.T) {
 	if server.Server.ControlListen != ":18790" {
 		t.Errorf("ControlListen = %q, want %q", server.Server.ControlListen, ":18790")
 	}
-	if server.Server.ProxyListen != ":17897" {
-		t.Errorf("ProxyListen = %q, want %q", server.Server.ProxyListen, ":17897")
+	if server.Server.ProxyListen != "127.0.0.1:17897" {
+		t.Errorf("ProxyListen = %q, want %q", server.Server.ProxyListen, "127.0.0.1:17897")
 	}
 
 	client, err := New(RoleClient)

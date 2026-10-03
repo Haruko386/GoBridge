@@ -3,7 +3,7 @@
 GoBridge 让固定地址的服务器通过实验室电脑上的 HTTP/SOCKS 代理访问网络。绑定的是机器身份，不是实验室电脑的动态 IP。
 
 ```text
-服务器 A :17897 -> 加密 Tunnel -> 实验室电脑 B -> 127.0.0.1:7897 -> Internet
+服务器 A 127.0.0.1:17897 -> 加密 Tunnel -> 实验室电脑 B -> 127.0.0.1:7897 -> Internet
 ```
 
 ## 构建
@@ -61,12 +61,24 @@ curl -I https://example.com
 
 A 始终使用自己的 `127.0.0.1:17897`，不需要保存或修改 B 的 IP。B 断网、重启或 IP 改变后，`gobridge connect` 会自动重连 A。
 
-Docker 容器可以使用 `http://host.docker.internal:17897`；Linux Docker 需要增加：
+代理入口默认只监听 A 的回环地址，不接受其他主机的连接。旧配置如果包含 `proxy_listen: :17897`，请将它改成 `proxy_listen: 127.0.0.1:17897`。
+
+如果 Docker 容器需要使用该代理，将 A 的 `proxy_listen` 显式改成 Docker 网桥的网关地址，例如：
+
+```yaml
+server:
+  control_listen: :18790
+  proxy_listen: 172.17.0.1:17897
+```
+
+然后容器使用 `http://host.docker.internal:17897`。Linux Docker Compose 还需要增加：
 
 ```yaml
 extra_hosts:
   - "host.docker.internal:host-gateway"
 ```
+
+Docker 网桥地址可能不同，请以本机实际配置为准，并使用防火墙确保 `17897` 只允许可信容器网段访问。不要在不受信任的网络上配置 `proxy_listen: :17897` 或 `0.0.0.0:17897`。
 
 ## 管理绑定
 

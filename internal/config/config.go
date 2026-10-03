@@ -63,7 +63,7 @@ func New(role Role) (Config, error) {
 			Role:    RoleServer,
 			Server: &ServerConfig{
 				ControlListen: ":18790",
-				ProxyListen:   ":17897",
+				ProxyListen:   "127.0.0.1:17897",
 			},
 		}, nil
 	case RoleClient:
