@@ -222,8 +222,19 @@ func TestStreamCloseInterruptsReadAndIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestStreamCloseUnblocksFullInboundQueue(t *testing.T) {
-	stream := mustNewStream(t, 5, &recordingWriter{}, nil)
+func TestStreamFullInboundQueueResetsWithoutBlocking(t *testing.T) {
+	writer := &recordingWriter{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	var closeCalls atomic.Int32
+	stream := mustNewStream(t, 5, writer, func(id protocol.StreamID) {
+		if id != 5 {
+			t.Errorf("onClose ID = %d, want 5", id)
+		}
+		closeCalls.Add(1)
+	})
+
 	for range streamInboundQueueSize {
 		if err := stream.deliver([]byte("x")); err != nil {
 			t.Fatalf("deliver() error = %v", err)
@@ -232,12 +243,8 @@ func TestStreamCloseUnblocksFullInboundQueue(t *testing.T) {
 
 	deliverResult := make(chan error, 1)
 	go func() {
-		deliverResult <- stream.deliver([]byte("blocked"))
+		deliverResult <- stream.deliver([]byte("overflow"))
 	}()
-
-	if err := stream.Close(); err != nil {
-		t.Fatalf("Close() error = %v", err)
-	}
 
 	select {
 	case err := <-deliverResult:
@@ -245,7 +252,44 @@ func TestStreamCloseUnblocksFullInboundQueue(t *testing.T) {
 			t.Fatalf("deliver() error = %v, want ErrStreamClosed", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("deliver() remained blocked after Close()")
+		t.Fatal("deliver() blocked on a full inbound queue")
+	}
+
+	select {
+	case <-writer.started:
+	case <-time.After(time.Second):
+		t.Fatal("reset did not start writing CLOSE_STREAM")
+	}
+
+	if n, err := stream.Read(make([]byte, 1)); n != 0 || !errors.Is(err, ErrStreamClosed) {
+		t.Fatalf("Read() after reset = (%d, %v), want (0, ErrStreamClosed)", n, err)
+	}
+	if got := closeCalls.Load(); got != 1 {
+		t.Fatalf("onClose call count = %d, want 1", got)
+	}
+
+	close(writer.release)
+
+	deadline := time.After(time.Second)
+	for {
+		frames := writer.snapshot()
+		if len(frames) == 1 {
+			if frames[0].typ != protocol.TypeCloseStream {
+				t.Fatalf("frame type = %s, want CLOSE_STREAM", frames[0].typ)
+			}
+			break
+		}
+
+		select {
+		case <-deadline:
+			t.Fatal("reset did not finish writing CLOSE_STREAM")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	if err := stream.Close(); err != nil {
+		t.Fatalf("Close() after reset error = %v", err)
 	}
 }
 

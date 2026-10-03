@@ -87,6 +87,14 @@ func (s *Stream) Read(buffer []byte) (int, error) {
 }
 
 func (s *Stream) nextInbound() ([]byte, error) {
+	// A local close aborts reads immediately. In particular, an overloaded
+	// stream must not continue draining data that triggered its reset.
+	select {
+	case <-s.localDone:
+		return nil, ErrStreamClosed
+	default:
+	}
+
 	select {
 	case data := <-s.inbound:
 		return data, nil
@@ -163,16 +171,7 @@ func (s *Stream) Close() error {
 	s.localOnce.Do(func() {
 		close(s.localDone)
 
-		s.writeMu.Lock()
-		if !s.isRemoteClosed() {
-			payload, err := protocol.EncodeStreamID(s.id)
-			if err != nil {
-				s.closeErr = fmt.Errorf("encode CLOSE_STREAM for %d: %w", s.id, err)
-			} else if err := s.writer.WriteFrame(protocol.TypeCloseStream, payload); err != nil {
-				s.closeErr = fmt.Errorf("write CLOSE_STREAM for %d: %w", s.id, err)
-			}
-		}
-		s.writeMu.Unlock()
+		s.closeErr = s.writeCloseFrame()
 
 		s.onClose(s.id)
 	})
@@ -218,7 +217,52 @@ func (s *Stream) deliver(data []byte) error {
 
 	case <-s.remoteDone:
 		return fmt.Errorf("%w: %d", ErrStreamClosed, s.id)
+
+	default:
+		// The dispatcher owns the only frame-reading goroutine. Waiting for a
+		// slow stream here would stall every stream and heartbeat on the
+		// session. Reset only this stream and send its close frame separately.
+		s.reset()
+		return fmt.Errorf("%w: inbound queue full for stream %d", ErrStreamClosed, s.id)
 	}
+}
+
+func (s *Stream) reset() {
+	reset := false
+
+	s.localOnce.Do(func() {
+		close(s.localDone)
+		s.onClose(s.id)
+		reset = true
+	})
+
+	if !reset {
+		return
+	}
+
+	go func() {
+		_ = s.writeCloseFrame()
+	}()
+}
+
+func (s *Stream) writeCloseFrame() error {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	if s.isRemoteClosed() {
+		return nil
+	}
+
+	payload, err := protocol.EncodeStreamID(s.id)
+	if err != nil {
+		return fmt.Errorf("encode CLOSE_STREAM for %d: %w", s.id, err)
+	}
+
+	if err := s.writer.WriteFrame(protocol.TypeCloseStream, payload); err != nil {
+		return fmt.Errorf("write CLOSE_STREAM for %d: %w", s.id, err)
+	}
+
+	return nil
 }
 
 func (s *Stream) remoteClose() {

@@ -35,27 +35,29 @@ func Bridge(ctx context.Context, left, right Endpoint) error {
 	results := make(chan copyResult, 2)
 
 	var closeOnce sync.Once
+	var closeErr error
 
-	closeEndpoints := func() {
+	closeEndpoints := func() error {
 		closeOnce.Do(func() {
-			var closeGroup sync.WaitGroup
-			closeGroup.Add(2)
+			closeResults := make(chan error, 2)
 
 			go func() {
-				defer closeGroup.Done()
-				_ = left.Close()
+				closeResults <- left.Close()
 			}()
 
 			go func() {
-				defer closeGroup.Done()
-				_ = right.Close()
+				closeResults <- right.Close()
 			}()
 
-			closeGroup.Wait()
+			closeErr = errors.Join(<-closeResults, <-closeResults)
 		})
+
+		return closeErr
 	}
 
-	stopCancelClose := context.AfterFunc(ctx, closeEndpoints)
+	stopCancelClose := context.AfterFunc(ctx, func() {
+		_ = closeEndpoints()
+	})
 	defer stopCancelClose()
 
 	go copyDirection("left to right", right, left, results)
@@ -64,15 +66,25 @@ func Bridge(ctx context.Context, left, right Endpoint) error {
 
 	first := <-results
 
-	closeEndpoints()
-
-	second := <-results
-
-	if ctx.Err() != nil {
-		return nil
+	// io.Copy reports a successful source EOF as nil. In that case the
+	// reverse direction must remain open so it can carry the response. A
+	// non-nil error is terminal and closes both sides to unblock the peer.
+	if first.err != nil {
+		_ = closeEndpoints()
 	}
 
-	return errors.Join(normalizeCopyError(first), normalizeCopyError(second))
+	second := <-results
+	endpointErr := closeEndpoints()
+
+	if ctx.Err() != nil {
+		return endpointErr
+	}
+
+	return errors.Join(
+		normalizeCopyError(first),
+		normalizeCopyError(second),
+		endpointErr,
+	)
 }
 
 func copyDirection(direction string, destination io.Writer, source io.Reader, results chan<- copyResult) {
