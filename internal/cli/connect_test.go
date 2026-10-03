@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -82,6 +84,9 @@ func TestRunConnectRejectsUnpairedClient(t *testing.T) {
 }
 
 func TestServeAndConnectCLIEndToEnd(t *testing.T) {
+	upstream := connectCLIStartEchoServer(t)
+	defer upstream.Close()
+
 	serverDir := serveCLITestNode(t, config.RoleServer, "127.0.0.1:0")
 	clientDir := serveCLITestNode(t, config.RoleClient, "")
 	serverIdentity := connectCLILoadIdentity(t, serverDir)
@@ -106,6 +111,7 @@ func TestServeAndConnectCLIEndToEnd(t *testing.T) {
 		return strings.Contains(serverStdout.String(), "GoBridge server listening on ")
 	}, "server CLI startup")
 	serverAddress := serveCLIListeningAddress(t, serverStdout.String())
+	proxyAddress := serveCLIProxyAddress(t, serverStdout.String())
 
 	clientConfig, err := config.Load(clientDir)
 	if err != nil {
@@ -113,6 +119,7 @@ func TestServeAndConnectCLIEndToEnd(t *testing.T) {
 	}
 	clientConfig.Client.ServerAddress = serverAddress
 	clientConfig.Client.ServerNodeID = serverIdentity.NodeID()
+	clientConfig.Client.ProxyAddress = upstream.Addr().String()
 	if err := config.Save(clientDir, clientConfig); err != nil {
 		t.Fatalf("config.Save(client) error = %v", err)
 	}
@@ -147,6 +154,32 @@ func TestServeAndConnectCLIEndToEnd(t *testing.T) {
 	if !strings.Contains(clientStdout.String(), "Expected server Node ID: "+serverIdentity.NodeID()) {
 		t.Fatalf("client stdout = %q, want expected server node ID", clientStdout.String())
 	}
+	if !strings.Contains(clientStdout.String(), "Upstream proxy: "+upstream.Addr().String()) {
+		t.Fatalf("client stdout = %q, want upstream proxy address", clientStdout.String())
+	}
+
+	var proxyResponse string
+	serveCLIEventually(t, func() bool {
+		connection, err := net.DialTimeout("tcp", proxyAddress, 100*time.Millisecond)
+		if err != nil {
+			return false
+		}
+		defer connection.Close()
+		_ = connection.SetDeadline(time.Now().Add(200 * time.Millisecond))
+
+		if _, err := connection.Write([]byte("through-tunnel")); err != nil {
+			return false
+		}
+		response := make([]byte, len("echo:through-tunnel"))
+		if _, err := io.ReadFull(connection, response); err != nil {
+			return false
+		}
+		proxyResponse = string(response)
+		return true
+	}, "proxy traffic through tunnel")
+	if proxyResponse != "echo:through-tunnel" {
+		t.Fatalf("proxy response = %q, want %q", proxyResponse, "echo:through-tunnel")
+	}
 
 	// Stopping the server after the client has had time to exchange heartbeats
 	// makes the client's connection-ended log observable and proves the two CLI
@@ -167,6 +200,44 @@ func TestServeAndConnectCLIEndToEnd(t *testing.T) {
 	if !strings.Contains(clientStdout.String(), "GoBridge client stopped") {
 		t.Fatalf("client stdout = %q, want stop message", clientStdout.String())
 	}
+}
+
+func serveCLIProxyAddress(t *testing.T, output string) string {
+	t.Helper()
+	const prefix = "GoBridge proxy listening on "
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimPrefix(line, prefix)
+		}
+	}
+	t.Fatalf("proxy listening address missing from output %q", output)
+	return ""
+}
+
+func connectCLIStartEchoServer(t *testing.T) net.Listener {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("start upstream echo server: %v", err)
+	}
+
+	go func() {
+		for {
+			connection, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer connection.Close()
+				request := make([]byte, len("through-tunnel"))
+				if _, err := io.ReadFull(connection, request); err != nil {
+					return
+				}
+				_, _ = connection.Write([]byte("echo:" + string(request)))
+			}()
+		}
+	}()
+	return listener
 }
 
 func connectCLILoadIdentity(t *testing.T, dir string) identity.Identity {

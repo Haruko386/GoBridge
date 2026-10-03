@@ -200,6 +200,7 @@ func serveCLITestNode(t *testing.T, role config.Role, controlListen string) stri
 	}
 	if role == config.RoleServer && controlListen != "" {
 		cfg.Server.ControlListen = controlListen
+		cfg.Server.ProxyListen = "127.0.0.1:0"
 	}
 	if err := config.SaveNew(dir, cfg); err != nil {
 		t.Fatalf("config.SaveNew() error = %v", err)

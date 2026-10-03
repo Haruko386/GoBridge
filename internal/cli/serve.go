@@ -23,9 +23,10 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	configDir := flags.String("config-dir", "", "configuration directory (default: ~/.gobridge)")
 
 	authTimeout := flags.Duration("auth-timeout", transport.DefaultHandshakeTimeout, "authenticated connection handshake timeout")
+	heartbeatTimeout := flags.Duration("heartbeat-timeout", defaultHeartbeatTimeout, "maximum time allowed for heartbeat writes")
 
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: gobridge serve [--config-dir <path>] [--auth-timeout <duration>]")
+		fmt.Fprintln(stderr, "Usage: gobridge serve [--config-dir <path>] [--auth-timeout <duration>] [--heartbeat-timeout <duration>]")
 		flags.PrintDefaults()
 	}
 
@@ -41,8 +42,8 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		return 2
 	}
 
-	if *authTimeout <= 0 {
-		fmt.Fprintln(stderr, "serve: --auth-timeout must be positive")
+	if *authTimeout <= 0 || *heartbeatTimeout <= 0 {
+		fmt.Fprintln(stderr, "serve: all durations must be positive")
 		return 2
 	}
 
@@ -79,18 +80,29 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		return 1
 	}
 
-	listener, err := net.Listen(
-		"tcp",
-		cfg.Server.ControlListen,
-	)
+	listener, err := net.Listen("tcp", cfg.Server.ControlListen)
 	if err != nil {
 		fmt.Fprintf(stderr, "serve: listen on %s: %v\n", cfg.Server.ControlListen, err)
 		return 1
 	}
+	proxyListener, err := net.Listen("tcp", cfg.Server.ProxyListen)
+	if err != nil {
+		_ = listener.Close()
+		fmt.Fprintf(stderr, "serve: listen for proxy traffic on %s: %v\n", cfg.Server.ProxyListen, err)
+		return 1
+	}
 
 	registry := server.NewRegistry()
+	tunnels := server.NewTunnelRegistry()
 
 	logger := log.New(stderr, "serve: ", 0)
+	handler, err := server.NewTunnelHandler(tunnels, *heartbeatTimeout)
+	if err != nil {
+		_ = listener.Close()
+		_ = proxyListener.Close()
+		fmt.Fprintf(stderr, "serve: create tunnel handler: %v\n", err)
+		return 1
+	}
 
 	runtimeServer, err := server.NewServer(
 		listener,
@@ -98,26 +110,58 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		peers.PublicKey,
 		registry,
 		*authTimeout,
-		server.HandleHeartbeatSession,
+		handler,
 		func(err error) {
 			logger.Printf("connection error: %v", err)
 		},
 	)
 	if err != nil {
 		_ = listener.Close()
+		_ = proxyListener.Close()
 
 		fmt.Fprintf(stderr, "serve: create server runtime: %v\n", err)
 		return 1
 	}
+	proxyServer, err := server.NewProxyServer(proxyListener, tunnels, func(err error) {
+		logger.Printf("proxy error: %v", err)
+	})
+	if err != nil {
+		_ = listener.Close()
+		_ = proxyListener.Close()
+		fmt.Fprintf(stderr, "serve: create proxy server: %v\n", err)
+		return 1
+	}
 
 	fmt.Fprintf(stdout, "GoBridge server listening on %s\n", listener.Addr())
+	fmt.Fprintf(stdout, "GoBridge proxy listening on %s\n", proxyListener.Addr())
 	fmt.Fprintf(stdout, "Node ID: %s\n", nodeIdentity.NodeID())
 
-	if err := runtimeServer.Serve(ctx); err != nil {
+	if err := runServerServices(ctx, runtimeServer, proxyServer); err != nil {
 		fmt.Fprintf(stderr, "serve: %v\n", err)
 		return 1
 	}
 
 	fmt.Fprintln(stdout, "GoBridge server stopped")
 	return 0
+}
+
+type contextServer interface {
+	Serve(context.Context) error
+}
+
+func runServerServices(ctx context.Context, controlServer, proxyServer contextServer) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	results := make(chan error, 2)
+
+	go func() { results <- controlServer.Serve(runCtx) }()
+	go func() { results <- proxyServer.Serve(runCtx) }()
+
+	first := <-results
+	cancel()
+	second := <-results
+
+	if ctx.Err() != nil {
+		return nil
+	}
+	return errors.Join(first, second)
 }

@@ -21,6 +21,7 @@ const (
 	defaultHeartbeatTimeout  = 10 * time.Second
 	defaultMinBackoff        = time.Second
 	defaultMaxBackoff        = 30 * time.Second
+	defaultProxyDialTimeout  = 10 * time.Second
 )
 
 func runConnect(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -68,6 +69,8 @@ func runConnect(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		"maximum reconnect delay",
 	)
 
+	proxyDialTimeout := flags.Duration("proxy-dial-timeout", defaultProxyDialTimeout, "maximum time to connect to the local proxy")
+
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -80,7 +83,7 @@ func runConnect(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return 2
 	}
 
-	if *authTimeout <= 0 || *heartbeatInterval <= 0 || *heartbeatTimeout <= 0 || *minBackoff <= 0 || *maxBackoff <= 0 {
+	if *authTimeout <= 0 || *heartbeatInterval <= 0 || *heartbeatTimeout <= 0 || *minBackoff <= 0 || *maxBackoff <= 0 || *proxyDialTimeout <= 0 {
 		fmt.Fprintln(stderr, "connect: all durations must be positive")
 		return 2
 	}
@@ -130,8 +133,13 @@ func runConnect(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	}
 
 	logger := log.New(stderr, "connect: ", 0)
+	forwarder, err := client.NewProxyForwarder(cfg.Client.ProxyAddress, *proxyDialTimeout)
+	if err != nil {
+		fmt.Fprintln(stderr, "connect: failed to create proxy forwarder:", err)
+		return 1
+	}
 
-	runner, err := client.NewRunner(connector, *heartbeatInterval, *heartbeatTimeout, *minBackoff, *maxBackoff, func(err error) {
+	runner, err := client.NewTunnelRunner(connector, forwarder, *heartbeatInterval, *heartbeatTimeout, *minBackoff, *maxBackoff, func(err error) {
 		logger.Printf("%v", err)
 	})
 	if err != nil {
@@ -141,6 +149,7 @@ func runConnect(ctx context.Context, args []string, stdout, stderr io.Writer) in
 
 	fmt.Fprintf(stdout, "GoBridge client connecting to %s\n", connector.Address())
 	fmt.Fprintf(stdout, "Expected server Node ID: %s\n", connector.ServerNodeID())
+	fmt.Fprintf(stdout, "Upstream proxy: %s\n", forwarder.Address())
 
 	if err := runner.Run(ctx); err != nil {
 		fmt.Fprintf(stderr, "connect: %v\n", err)

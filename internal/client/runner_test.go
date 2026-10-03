@@ -13,7 +13,7 @@ import (
 
 func TestNewRunnerValidatesConfiguration(t *testing.T) {
 	validConnect := func(context.Context) (HeartbeatSession, error) { return nil, errors.New("unused") }
-	validHeartbeat := func(context.Context, HeartbeatSession, time.Duration, time.Duration) error { return nil }
+	validSession := func(context.Context, HeartbeatSession, time.Duration, time.Duration) error { return nil }
 
 	if _, err := NewRunner(nil, time.Second, time.Second, time.Second, time.Second, nil); err == nil {
 		t.Fatal("NewRunner(nil connector) error = nil")
@@ -22,26 +22,26 @@ func TestNewRunnerValidatesConfiguration(t *testing.T) {
 	tests := []struct {
 		name              string
 		connect           connectSessionFunc
-		heartbeat         runHeartbeatFunc
+		runSession        runSessionFunc
 		heartbeatInterval time.Duration
 		heartbeatTimeout  time.Duration
 		minBackoff        time.Duration
 		maxBackoff        time.Duration
 	}{
-		{name: "nil connect", heartbeat: validHeartbeat, heartbeatInterval: time.Second, heartbeatTimeout: time.Second, minBackoff: time.Second, maxBackoff: time.Second},
-		{name: "nil heartbeat", connect: validConnect, heartbeatInterval: time.Second, heartbeatTimeout: time.Second, minBackoff: time.Second, maxBackoff: time.Second},
-		{name: "zero heartbeat interval", connect: validConnect, heartbeat: validHeartbeat, heartbeatTimeout: time.Second, minBackoff: time.Second, maxBackoff: time.Second},
-		{name: "zero heartbeat timeout", connect: validConnect, heartbeat: validHeartbeat, heartbeatInterval: time.Second, minBackoff: time.Second, maxBackoff: time.Second},
-		{name: "zero min backoff", connect: validConnect, heartbeat: validHeartbeat, heartbeatInterval: time.Second, heartbeatTimeout: time.Second, maxBackoff: time.Second},
-		{name: "zero max backoff", connect: validConnect, heartbeat: validHeartbeat, heartbeatInterval: time.Second, heartbeatTimeout: time.Second, minBackoff: time.Second},
-		{name: "max below min", connect: validConnect, heartbeat: validHeartbeat, heartbeatInterval: time.Second, heartbeatTimeout: time.Second, minBackoff: 2 * time.Second, maxBackoff: time.Second},
+		{name: "nil connect", runSession: validSession, heartbeatInterval: time.Second, heartbeatTimeout: time.Second, minBackoff: time.Second, maxBackoff: time.Second},
+		{name: "nil session", connect: validConnect, heartbeatInterval: time.Second, heartbeatTimeout: time.Second, minBackoff: time.Second, maxBackoff: time.Second},
+		{name: "zero heartbeat interval", connect: validConnect, runSession: validSession, heartbeatTimeout: time.Second, minBackoff: time.Second, maxBackoff: time.Second},
+		{name: "zero heartbeat timeout", connect: validConnect, runSession: validSession, heartbeatInterval: time.Second, minBackoff: time.Second, maxBackoff: time.Second},
+		{name: "zero min backoff", connect: validConnect, runSession: validSession, heartbeatInterval: time.Second, heartbeatTimeout: time.Second, maxBackoff: time.Second},
+		{name: "zero max backoff", connect: validConnect, runSession: validSession, heartbeatInterval: time.Second, heartbeatTimeout: time.Second, minBackoff: time.Second},
+		{name: "max below min", connect: validConnect, runSession: validSession, heartbeatInterval: time.Second, heartbeatTimeout: time.Second, minBackoff: 2 * time.Second, maxBackoff: time.Second},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := newRunner(
 				test.connect,
-				test.heartbeat,
+				test.runSession,
 				test.heartbeatInterval,
 				test.heartbeatTimeout,
 				test.minBackoff,
@@ -51,6 +51,20 @@ func TestNewRunnerValidatesConfiguration(t *testing.T) {
 				t.Fatal("newRunner() error = nil")
 			}
 		})
+	}
+}
+
+func TestNewTunnelRunnerValidatesDependencies(t *testing.T) {
+	forwarder, err := NewProxyForwarder("127.0.0.1:7897", time.Second)
+	if err != nil {
+		t.Fatalf("NewProxyForwarder() error = %v", err)
+	}
+
+	if _, err := NewTunnelRunner(nil, forwarder, time.Second, time.Second, time.Second, time.Second, nil); err == nil {
+		t.Fatal("NewTunnelRunner(nil connector) error = nil")
+	}
+	if _, err := NewTunnelRunner(&Connector{}, nil, time.Second, time.Second, time.Second, time.Second, nil); err == nil {
+		t.Fatal("NewTunnelRunner(nil forwarder) error = nil")
 	}
 }
 

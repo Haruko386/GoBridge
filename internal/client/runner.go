@@ -8,11 +8,12 @@ import (
 
 	"github.com/Haruko386/GoBridge/internal/peer"
 	"github.com/Haruko386/GoBridge/internal/transport"
+	"github.com/Haruko386/GoBridge/internal/tunnel"
 )
 
 type Runner struct {
 	connect           connectSessionFunc
-	runHeartbeat      runHeartbeatFunc
+	runSession        runSessionFunc
 	waitRetry         waitRetryFunc
 	heartbeatInterval time.Duration
 	heartbeatTimeout  time.Duration
@@ -23,7 +24,7 @@ type Runner struct {
 
 type connectSessionFunc func(context.Context) (HeartbeatSession, error)
 
-type runHeartbeatFunc func(context.Context, HeartbeatSession, time.Duration, time.Duration) error
+type runSessionFunc func(context.Context, HeartbeatSession, time.Duration, time.Duration) error
 
 type waitRetryFunc func(context.Context, time.Duration) bool
 
@@ -45,9 +46,44 @@ func NewRunner(connector *Connector, heartbeatInterval time.Duration, heartbeatT
 	)
 }
 
+func NewTunnelRunner(connector *Connector, forwarder *ProxyForwarder, heartbeatInterval, heartbeatTimeout, minBackoff, maxBackoff time.Duration, reportError func(error)) (*Runner, error) {
+	if connector == nil {
+		return nil, errors.New("runner connector is nil")
+	}
+	if forwarder == nil {
+		return nil, errors.New("runner proxy forwarder is nil")
+	}
+	if reportError == nil {
+		reportError = func(error) {}
+	}
+
+	runSession := func(ctx context.Context, session HeartbeatSession, interval, timeout time.Duration) error {
+		sessionCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
+		manager, err := tunnel.NewManager(session, tunnel.FirstClientStreamID, func(stream *tunnel.Stream) {
+			if err := forwarder.Forward(sessionCtx, stream); err != nil && sessionCtx.Err() == nil {
+				reportError(fmt.Errorf("forward proxy stream: %w", err))
+			}
+		})
+		if err != nil {
+			return fmt.Errorf("create client tunnel manager: %w", err)
+		}
+
+		runtime, err := tunnel.NewRuntime(session, manager, interval, timeout)
+		if err != nil {
+			_ = manager.Close()
+			return fmt.Errorf("create client tunnel runtime: %w", err)
+		}
+		return runtime.Run(sessionCtx)
+	}
+
+	return newRunner(func(ctx context.Context) (HeartbeatSession, error) { return connector.Connect(ctx) }, runSession, heartbeatInterval, heartbeatTimeout, minBackoff, maxBackoff, reportError)
+}
+
 func newRunner(
 	connect connectSessionFunc,
-	runHeartbeat runHeartbeatFunc,
+	runSession runSessionFunc,
 	heartbeatInterval time.Duration,
 	heartbeatTimeout time.Duration,
 	minBackoff time.Duration,
@@ -57,8 +93,8 @@ func newRunner(
 	if connect == nil {
 		return nil, errors.New("runner connect function is nil")
 	}
-	if runHeartbeat == nil {
-		return nil, errors.New("runner heartbeat function is nil")
+	if runSession == nil {
+		return nil, errors.New("runner session function is nil")
 	}
 
 	if heartbeatInterval <= 0 {
@@ -83,7 +119,7 @@ func newRunner(
 
 	return &Runner{
 		connect:           connect,
-		runHeartbeat:      runHeartbeat,
+		runSession:        runSession,
 		waitRetry:         waitForRetry,
 		heartbeatInterval: heartbeatInterval,
 		heartbeatTimeout:  heartbeatTimeout,
@@ -123,7 +159,7 @@ func (r *Runner) Run(ctx context.Context) error {
 
 		backoff = r.minBackoff
 
-		err = r.runHeartbeat(ctx, session, r.heartbeatInterval, r.heartbeatTimeout)
+		err = r.runSession(ctx, session, r.heartbeatInterval, r.heartbeatTimeout)
 		if ctx.Err() != nil {
 			return nil
 		}
