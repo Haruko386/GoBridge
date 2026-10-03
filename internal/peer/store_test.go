@@ -289,6 +289,42 @@ func TestStoreConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
+func TestStoreReloadsExternalChanges(t *testing.T) {
+	dir := t.TempDir()
+	writer, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open(writer) error = %v", err)
+	}
+	reader, err := Open(dir)
+	if err != nil {
+		t.Fatalf("Open(reader) error = %v", err)
+	}
+
+	paired := newTestPeer(t, "external")
+	if err := writer.Add(paired); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if _, err := reader.Get(paired.NodeID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Get() before Reload() error = %v, want ErrNotFound", err)
+	}
+	if err := reader.Reload(); err != nil {
+		t.Fatalf("Reload() error = %v", err)
+	}
+	if got, err := reader.Get(paired.NodeID); err != nil || !got.Enabled {
+		t.Fatalf("Get() after Reload() = (%#v, %v)", got, err)
+	}
+
+	if err := writer.Disable(paired.NodeID); err != nil {
+		t.Fatalf("Disable() error = %v", err)
+	}
+	if err := reader.Reload(); err != nil {
+		t.Fatalf("Reload(disabled) error = %v", err)
+	}
+	if got, err := reader.Get(paired.NodeID); err != nil || got.Enabled {
+		t.Fatalf("Get() after disable Reload() = (%#v, %v)", got, err)
+	}
+}
+
 func newTestPeer(t *testing.T, name string) Peer {
 	t.Helper()
 	publicKey, _, err := ed25519.GenerateKey(rand.Reader)

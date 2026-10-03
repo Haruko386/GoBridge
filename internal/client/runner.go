@@ -11,6 +11,8 @@ import (
 	"github.com/Haruko386/GoBridge/internal/tunnel"
 )
 
+const peerRefreshInterval = 250 * time.Millisecond
+
 type Runner struct {
 	connect           connectSessionFunc
 	runSession        runSessionFunc
@@ -75,7 +77,7 @@ func NewTunnelRunner(connector *Connector, forwarder *ProxyForwarder, heartbeatI
 			_ = manager.Close()
 			return fmt.Errorf("create client tunnel runtime: %w", err)
 		}
-		return runtime.Run(sessionCtx)
+		return runTunnelRuntime(sessionCtx, cancel, runtime, connector, reportError)
 	}
 
 	return newRunner(func(ctx context.Context) (HeartbeatSession, error) { return connector.Connect(ctx) }, runSession, heartbeatInterval, heartbeatTimeout, minBackoff, maxBackoff, reportError)
@@ -163,11 +165,50 @@ func (r *Runner) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
+		if isPermanentConnectionError(err) {
+			return err
+		}
 		if err != nil {
 			r.reportError(fmt.Errorf("connection ended: %w", err))
 		}
 		if !r.waitRetry(ctx, backoff) {
 			return nil
+		}
+	}
+}
+
+func runTunnelRuntime(ctx context.Context, cancel context.CancelFunc, runtime *tunnel.Runtime, connector *Connector, reportError func(error)) error {
+	result := make(chan error, 1)
+	go func() { result <- runtime.Run(ctx) }()
+
+	ticker := time.NewTicker(peerRefreshInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case err := <-result:
+			return err
+		case <-ticker.C:
+			if err := connector.peers.Reload(); err != nil {
+				reportError(fmt.Errorf("reload peer store: %w", err))
+				continue
+			}
+
+			paired, err := connector.peers.Get(connector.serverNodeID)
+			if errors.Is(err, peer.ErrNotFound) {
+				cancel()
+				<-result
+				return fmt.Errorf("paired server removed: %w", err)
+			}
+			if err != nil {
+				reportError(fmt.Errorf("load paired server: %w", err))
+				continue
+			}
+			if !paired.Enabled {
+				cancel()
+				<-result
+				return fmt.Errorf("%w: %s", ErrServerPeerDisabled, paired.NodeID)
+			}
 		}
 	}
 }

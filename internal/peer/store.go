@@ -11,13 +11,16 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	FileName       = "peers.yaml"
-	CurrentVersion = 1
+	FileName          = "peers.yaml"
+	CurrentVersion    = 1
+	replaceAttempts   = 20
+	replaceRetryDelay = 5 * time.Millisecond
 )
 
 var (
@@ -66,49 +69,70 @@ func Open(dir string) (*Store, error) {
 		return nil, fmt.Errorf("read peer store: %w", err)
 	}
 
+	loaded, err := decodePeers(data)
+	if err != nil {
+		return nil, err
+	}
+	store.peers = loaded
+
+	return store, nil
+}
+
+func (s *Store) Reload() error {
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read peer store: %w", err)
+	}
+
+	loaded, err := decodePeers(data)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.peers = loaded
+	s.mu.Unlock()
+	return nil
+}
+
+func decodePeers(data []byte) (map[string]Peer, error) {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 
 	var disk diskStore
-	if err = decoder.Decode(&disk); err != nil {
+	if err := decoder.Decode(&disk); err != nil {
 		return nil, fmt.Errorf("decode peer store: %w", err)
 	}
-
 	if disk.Version != CurrentVersion {
 		return nil, fmt.Errorf("unsupported peer store version: got %d, want %d", disk.Version, CurrentVersion)
 	}
 
+	peers := make(map[string]Peer, len(disk.Peers))
 	names := make(map[string]struct{}, len(disk.Peers))
-	for _, peer := range disk.Peers {
-		publicKey, err := base64.StdEncoding.DecodeString(peer.PublicKey)
+	for _, value := range disk.Peers {
+		publicKey, err := base64.StdEncoding.DecodeString(value.PublicKey)
 		if err != nil {
 			return nil, fmt.Errorf("decode peer public key: %w", err)
 		}
 
-		current := Peer{
-			NodeID:    peer.NodeID,
-			Name:      peer.Name,
-			PublicKey: ed25519.PublicKey(publicKey),
-			Enabled:   peer.Enabled,
-		}
-
+		current := Peer{NodeID: value.NodeID, Name: value.Name, PublicKey: ed25519.PublicKey(publicKey), Enabled: value.Enabled}
 		if err := current.Validate(); err != nil {
-			return nil, fmt.Errorf("validate peer %q: %w", peer.NodeID, err)
+			return nil, fmt.Errorf("validate peer %q: %w", value.NodeID, err)
 		}
-
-		if _, exists := store.peers[current.NodeID]; exists {
+		if _, exists := peers[current.NodeID]; exists {
 			return nil, fmt.Errorf("%w: %s", ErrAlreadyExists, current.NodeID)
 		}
-
 		if _, exists := names[current.Name]; exists {
 			return nil, fmt.Errorf("%w: %s", ErrNameAlreadyExists, current.Name)
 		}
 
 		names[current.Name] = struct{}{}
-		store.peers[current.NodeID] = clonePeer(current)
+		peers[current.NodeID] = clonePeer(current)
 	}
-
-	return store, nil
+	return peers, nil
 }
 
 func (s *Store) Add(peer Peer) error {
@@ -326,7 +350,7 @@ func replaceFile(tempPath, targetPath string) error {
 	backupPath := targetPath + ".bak"
 
 	if _, err := os.Stat(targetPath); errors.Is(err, os.ErrNotExist) {
-		return os.Rename(tempPath, targetPath)
+		return renameWithRetry(tempPath, targetPath)
 	} else if err != nil {
 		return err
 	}
@@ -335,17 +359,30 @@ func replaceFile(tempPath, targetPath string) error {
 		return err
 	}
 
-	if err := os.Rename(targetPath, backupPath); err != nil {
+	if err := renameWithRetry(targetPath, backupPath); err != nil {
 		return err
 	}
 
-	if err := os.Rename(tempPath, targetPath); err != nil {
-		_ = os.Rename(backupPath, targetPath)
+	if err := renameWithRetry(tempPath, targetPath); err != nil {
+		_ = renameWithRetry(backupPath, targetPath)
 		return err
 	}
 
 	_ = os.Remove(backupPath)
 	return nil
+}
+
+func renameWithRetry(oldPath, newPath string) error {
+	var err error
+	for attempt := 0; attempt < replaceAttempts; attempt++ {
+		if err = os.Rename(oldPath, newPath); err == nil {
+			return nil
+		}
+		if attempt+1 < replaceAttempts {
+			time.Sleep(replaceRetryDelay)
+		}
+	}
+	return err
 }
 
 func recoverBackup(path string) error {

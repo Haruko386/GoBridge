@@ -9,6 +9,7 @@ import (
 
 	"github.com/Haruko386/GoBridge/internal/peer"
 	"github.com/Haruko386/GoBridge/internal/transport"
+	"github.com/Haruko386/GoBridge/internal/tunnel"
 )
 
 func TestNewRunnerValidatesConfiguration(t *testing.T) {
@@ -218,6 +219,47 @@ func TestRunnerRejectsNilContext(t *testing.T) {
 	}
 	if err := runner.Run(nil); err == nil {
 		t.Fatal("Run(nil) error = nil")
+	}
+}
+
+func TestTunnelRuntimeStopsWhenServerPeerIsDisabled(t *testing.T) {
+	dir := t.TempDir()
+	writer, err := peer.Open(dir)
+	if err != nil {
+		t.Fatalf("peer.Open(writer) error = %v", err)
+	}
+	serverIdentity := connectorTestIdentity(t)
+	addConnectorPeer(t, writer, "server", serverIdentity)
+	reader, err := peer.Open(dir)
+	if err != nil {
+		t.Fatalf("peer.Open(reader) error = %v", err)
+	}
+
+	connector := &Connector{peers: reader, serverNodeID: serverIdentity.NodeID()}
+	session := newClientHeartbeatTestSession()
+	manager, err := tunnel.NewManager(session, tunnel.FirstClientStreamID, func(*tunnel.Stream) {})
+	if err != nil {
+		t.Fatalf("tunnel.NewManager() error = %v", err)
+	}
+	runtime, err := tunnel.NewRuntime(session, manager, time.Hour, time.Second)
+	if err != nil {
+		t.Fatalf("tunnel.NewRuntime() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- runTunnelRuntime(ctx, cancel, runtime, connector, func(error) {}) }()
+
+	if err := writer.Disable(serverIdentity.NodeID()); err != nil {
+		t.Fatalf("Store.Disable() error = %v", err)
+	}
+	select {
+	case err := <-result:
+		if !errors.Is(err, ErrServerPeerDisabled) {
+			t.Fatalf("runTunnelRuntime() error = %v, want ErrServerPeerDisabled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runTunnelRuntime() did not stop after peer disable")
 	}
 }
 

@@ -79,6 +79,9 @@ func (c *Connector) Connect(ctx context.Context) (*transport.Session, error) {
 	if ctx == nil {
 		return nil, errors.New("connection context is nil")
 	}
+	if err := c.peers.Reload(); err != nil {
+		return nil, fmt.Errorf("reload peer store: %w", err)
+	}
 
 	serverPeer, err := c.peers.Get(c.serverNodeID)
 	if err != nil {
