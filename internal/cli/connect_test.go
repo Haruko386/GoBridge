@@ -3,9 +3,11 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -160,25 +162,34 @@ func TestServeAndConnectCLIEndToEnd(t *testing.T) {
 
 	var proxyResponse string
 	serveCLIEventually(t, func() bool {
-		connection, err := net.DialTimeout("tcp", proxyAddress, 100*time.Millisecond)
-		if err != nil {
-			return false
-		}
-		defer connection.Close()
-		_ = connection.SetDeadline(time.Now().Add(200 * time.Millisecond))
-
-		if _, err := connection.Write([]byte("through-tunnel")); err != nil {
-			return false
-		}
-		response := make([]byte, len("echo:through-tunnel"))
-		if _, err := io.ReadFull(connection, response); err != nil {
-			return false
-		}
-		proxyResponse = string(response)
-		return true
+		proxyResponse, err = connectCLIProxyRequest(proxyAddress, "through-tunnel", 200*time.Millisecond)
+		return err == nil
 	}, "proxy traffic through tunnel")
 	if proxyResponse != "echo:through-tunnel" {
 		t.Fatalf("proxy response = %q, want %q", proxyResponse, "echo:through-tunnel")
+	}
+
+	const concurrentStreams = 8
+	streamErrors := make(chan error, concurrentStreams)
+	var streamGroup sync.WaitGroup
+	for index := 0; index < concurrentStreams; index++ {
+		streamGroup.Add(1)
+		go func() {
+			defer streamGroup.Done()
+			request := fmt.Sprintf("stream-%07d", index)
+			response, err := connectCLIProxyRequest(proxyAddress, request, time.Second)
+			if err == nil && response != "echo:"+request {
+				err = fmt.Errorf("response = %q, want %q", response, "echo:"+request)
+			}
+			streamErrors <- err
+		}()
+	}
+	streamGroup.Wait()
+	close(streamErrors)
+	for err := range streamErrors {
+		if err != nil {
+			t.Fatalf("concurrent proxy stream: %v", err)
+		}
 	}
 
 	// Stopping the server after the client has had time to exchange heartbeats
@@ -238,6 +249,25 @@ func connectCLIStartEchoServer(t *testing.T) net.Listener {
 		}
 	}()
 	return listener
+}
+
+func connectCLIProxyRequest(address, request string, timeout time.Duration) (string, error) {
+	connection, err := net.DialTimeout("tcp", address, timeout)
+	if err != nil {
+		return "", err
+	}
+	defer connection.Close()
+	if err := connection.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return "", err
+	}
+	if _, err := connection.Write([]byte(request)); err != nil {
+		return "", err
+	}
+	response := make([]byte, len("echo:")+len(request))
+	if _, err := io.ReadFull(connection, response); err != nil {
+		return "", err
+	}
+	return string(response), nil
 }
 
 func connectCLILoadIdentity(t *testing.T, dir string) identity.Identity {
